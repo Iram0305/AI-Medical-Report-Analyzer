@@ -1,5 +1,7 @@
 # app.py
-# SINGLE FILE: MediReport AI – PDF/Image → AI Summary (Free, Streamlit Cloud Ready)
+# MediReport AI – Single File, Free, Streamlit Cloud Ready
+# Uses Groq (free), EasyOCR (CPU), PyMuPDF
+# Deploy with: requirements.txt + runtime.txt + secrets.toml
 
 import streamlit as st
 import fitz  # PyMuPDF
@@ -11,21 +13,26 @@ import csv
 import io
 from PIL import Image
 import numpy as np
-import os
 
 # ================================
-# CONFIG & FREE API (GROQ)
+# 1. CONFIG: GROQ API via st.secrets
 # ================================
-GROQ_API_KEY = os.getenv("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")
-if not GROQ_API_KEY:
-    st.error("Please set GROQ_API_KEY in Streamlit Secrets.")
+try:
+    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+except KeyError:
+    st.error("Please set `GROQ_API_KEY` in **Streamlit Secrets** (Settings > Secrets).")
+    st.info("Example: `GROQ_API_KEY = \"gsk_your_key_here\"`")
+    st.stop()
+
+if not GROQ_API_KEY.startswith("gsk_"):
+    st.error("Invalid Groq API key format. Must start with `gsk_`.")
     st.stop()
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 OCR_READER = easyocr.Reader(['en'], gpu=False)
 
 # ================================
-# PROMPTS (Embedded)
+# 2. PROMPTS (Embedded)
 # ================================
 EXTRACT_PROMPT = """
 Extract the following in JSON only. No extra text.
@@ -63,7 +70,7 @@ Data:
 """
 
 # ================================
-# UTILS: PDF, OCR, AI
+# 3. UTILS: PDF, OCR, AI, CSV
 # ================================
 def extract_text_from_pdf(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -90,7 +97,7 @@ def call_groq(prompt, model="llama3-8b-8192"):
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception as e:
-        return f"{{'error': 'API failed: {e}'}}"
+        return json.dumps({"error": str(e)})
 
 def extract_structured(text):
     prompt = EXTRACT_PROMPT.replace("{{TEXT}}", text[:12000])
@@ -98,7 +105,7 @@ def extract_structured(text):
     try:
         data = json.loads(result)
     except:
-        data = {"error": "Failed to parse", "raw": result}
+        data = {"error": "Failed to parse AI response", "raw": result}
 
     # Auto-flag abnormal values
     for t in data.get("tests", []):
@@ -106,7 +113,7 @@ def extract_structured(text):
             val_match = re.search(r"[\d.]+", t["value"])
             if not val_match: continue
             val = float(val_match.group())
-            range_match = re.findall(r"[\d.]+", t["range"])
+            range_match = re.findall(r"[\d.]+", t["range"] or "")
             if len(range_match) >= 2:
                 low, high = float(range_match[0]), float(range_match[-1])
                 t["flag"] = "High" if val > high else "Low" if val < low else "Normal"
@@ -125,7 +132,7 @@ def dict_to_csv(data):
     output = io.StringIO()
     writer = csv.writer(output)
     for k, v in data.items():
-        if k != "tests" and k != "error" and k != "raw":
+        if k not in ["tests", "error", "raw"]:
             writer.writerow([k.replace("_", " ").title(), v])
     writer.writerow([])
     writer.writerow(["Test", "Value", "Unit", "Range", "Flag"])
@@ -140,11 +147,11 @@ def dict_to_csv(data):
     return output.getvalue()
 
 # ================================
-# STREAMLIT UI
+# 4. STREAMLIT UI
 # ================================
-st.set_page_config(page_title="MediReport AI", layout="centered")
+st.set_page_config(page_title="MediReport AI", layout="centered", page_icon="medical")
 st.title("MediReport AI")
-st.caption("Upload medical report (PDF/Image) → Get AI summary instantly")
+st.caption("Upload medical report (PDF or Image) → Get AI-powered summary instantly")
 
 uploaded = st.file_uploader(
     "Upload Report", 
@@ -164,26 +171,35 @@ if uploaded:
         st.error("No text found. Try a clearer image or PDF.")
         st.stop()
 
-    with st.spinner("Analyzing with AI..."):
+    with st.spinner("Analyzing with AI (Groq)..."):
         structured = extract_structured(raw_text)
         summary = summarize_report(raw_text, structured)
 
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Structured Data")
-        st.json(structured)
+        st.json(structured, expanded=False)
     with col2:
-        st.subheader("Patient Summary")
+        st.subheader("Patient-Friendly Summary")
         st.markdown(summary)
 
     csv_data = dict_to_csv(structured)
     st.download_button(
         "Download CSV",
         data=csv_data,
-        file_name="medical_report.csv",
+        file_name="medical_report_summary.csv",
         mime="text/csv"
     )
 
-# Footer
+# ================================
+# 5. FOOTER
+# ================================
 st.markdown("---")
-st.markdown("Powered by **Groq (free tier)** + **EasyOCR** + **Streamlit**")
+st.markdown(
+    """
+    **Powered by:**  
+    [Groq](https://groq.com) (Free Tier) • EasyOCR (CPU) • PyMuPDF • Streamlit  
+    Made in India | November 11, 2025
+    """
+)
+st.caption("For support: [GitHub Issues](https://github.com/yourname/ai-medical-report-analyzer)")
