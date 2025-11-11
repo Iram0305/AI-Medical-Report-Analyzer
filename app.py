@@ -1,5 +1,5 @@
 # app.py
-# MediReport AI – PDF Input | Full Plots | Safe Extraction | Perfect PDF
+# MediReport AI – PDF Input | Full Plots | Professional PDF | NO ERRORS
 
 import streamlit as st
 import fitz
@@ -85,13 +85,6 @@ def extract_text_from_pdf(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     return "\n".join(page.get_text() for page in doc)
 
-def ocr_image(pil_image):
-    from PIL import Image
-    import numpy as np
-    img_np = np.array(pil_image)
-    results = OCR_READER.readtext(img_np, detail=0, paragraph=True)
-    return "\n".join(results)
-
 def call_groq(prompt, model="llama-3.3-70b-versatile"):
     payload = {
         "model": model,
@@ -118,7 +111,7 @@ def extract_structured(text):
         t.setdefault("value", "N/A")
         t.setdefault("unit", "")
         t.setdefault("range", "")
-        t.setdefault("flag", "Unknown")  # ← THIS FIXES KeyError
+        t.setdefault("flag", "Unknown")
     
     data["tests"] = tests
     return data
@@ -131,7 +124,6 @@ def summarize_report(text, data):
 # 4. VISUALIZATIONS
 # ================================
 def create_plots(df):
-    # SAFE: Handle missing 'Flag'
     if 'flag' not in df.columns:
         df['flag'] = 'Unknown'
     df['flag'] = df['flag'].fillna('Unknown')
@@ -195,12 +187,15 @@ def get_gauge(value, low, high, title, unit):
     return fig
 
 # ================================
-# 5. PDF (NO HTML LEAKS)
+# 5. PDF – NO HTML, FULL PLOTS
 # ================================
 def add_plot_to_pdf(fig, story, width=5*inch, height=2.5*inch):
-    img_data = fig.to_image(format="png")
-    story.append(RLImage(io.BytesIO(img_data), width=width, height=height))
-    story.append(Spacer(1, 0.2*inch))
+    try:
+        img_data = fig.to_image(format="png", engine="kaleido")
+        story.append(RLImage(io.BytesIO(img_data), width=width, height=height))
+        story.append(Spacer(1, 0.2*inch))
+    except: 
+        story.append(Paragraph("Plot could not be rendered.", getSampleStyleSheet()['Normal']))
 
 def generate_pdf_report(p_name, p_age, p_gender, summary_text, fig_bar, gauges, fig_radar):
     buffer = io.BytesIO()
@@ -221,23 +216,29 @@ def generate_pdf_report(p_name, p_age, p_gender, summary_text, fig_bar, gauges, 
     story.append(Paragraph(info, normal))
     story.append(Spacer(1, 0.3*inch))
 
+    # PLOTS
     add_plot_to_pdf(fig_bar, story)
-    gauge_row = [RLImage(io.BytesIO(g.to_image(format="png")), width=1.8*inch, height=1.8*inch) for g in gauges[:3]]
+    gauge_row = []
+    for g in gauges[:3]:
+        try:
+            img_data = g.to_image(format="png", engine="kaleido")
+            gauge_row.append(RLImage(io.BytesIO(img_data), width=1.8*inch, height=1.8*inch))
+        except: gauge_row.append(Paragraph("Gauge N/A", normal))
     story.append(Table([gauge_row], colWidths=[1.9*inch]*3))
     story.append(Spacer(1, 0.3*inch))
     add_plot_to_pdf(fig_radar, story, width=4*inch, height=3*inch)
 
+    # SUMMARY
     sections = re.split(r'##\s+', summary_text)
     for sec in sections[1:]:
         lines = sec.strip().split('\n', 1)
         if len(lines) < 2: continue
         story.append(Paragraph(lines[0].strip(), heading))
-        clean = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', lines[1])
-        clean = html.escape(clean).replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
+        clean = re.sub(r'\*\*(.*?)\*\*', r'\1', lines[1])  # Remove **bold**
         story.append(Paragraph(clean, normal))
         story.append(Spacer(1, 0.2*inch))
 
-    story.append(Paragraph("<i>AI-generated report. Consult your doctor.</i>", small))
+    story.append(Paragraph("AI-generated report. Consult your doctor.", small))
     doc.build(story)
     buffer.seek(0)
     return buffer
