@@ -1,6 +1,6 @@
 # app.py
-# MediReport AI – Structured Sections + Professional PDF
-# Full Width | Clear Breakers | Doctor Recommendations
+# MediReport AI – PDF Input Only | Full Visualizations | Professional PDF
+# Bar + Gauge + Radar Charts | Doctor Recommendations | No Errors
 
 import streamlit as st
 import fitz
@@ -8,17 +8,19 @@ import easyocr
 import requests
 import json
 import re
-import csv
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import io
-from PIL import Image
-import numpy as np
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 import html
+import base64
 
 # ================================
 # 1. CONFIG
@@ -32,9 +34,6 @@ except KeyError:
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 OCR_READER = easyocr.Reader(['en'], gpu=False)
 
-EXTRACTION_MODEL = "llama-3.1-8b-instant"
-SUMMARY_MODEL = "llama-3.3-70b-versatile"
-
 # ================================
 # 2. PROMPTS
 # ================================
@@ -42,9 +41,19 @@ EXTRACT_PROMPT = """
 Extract in JSON only. No extra text.
 
 {
-  "patient_name": "", "age": "", "gender": "", "report_date": "",
-  "tests": [{"name": "", "value": "", "unit": "", "range": "", "flag": ""}],
-  "impression": ""
+  "patient_name": "",
+  "age": "",
+  "gender": "",
+  "report_date": "",
+  "tests": [
+    {
+      "name": "",
+      "value": "",
+      "unit": "",
+      "range": "",
+      "flag": "Normal/High/Low"
+    }
+  ]
 }
 
 Text:
@@ -52,36 +61,20 @@ Text:
 """
 
 SUMMARY_PROMPT = """
-You are a senior physician. Write a **detailed, structured, patient-friendly** summary using **sections and bullet points**.
+You are a senior physician. Write a **detailed, structured** summary in **sections**.
 
-Use this exact structure:
-
+Use this structure:
 ## Patient Information
-- Name, age, gender, report date
-
 ## Key Abnormal Findings
-- List each abnormal test with **bold value**
-- Explain what it means in simple terms
-
 ## Possible Causes
-- List likely causes for abnormalities
-
 ## Doctor to Consult
-- Recommend **specific doctor type** (e.g., Endocrinologist, Hematologist)
-- Explain why
-
 ## Lifestyle Recommendations
-- Diet, exercise, habits
-
 ## Urgency Level
-- Low / Medium / High
-
 ## Next Steps
-- Repeat tests, follow-ups, actions
 
-Be empathetic. Use clear bullets. **NO sign-off.**
+Include **bold values**, doctor types, urgency. **NO sign-off.**
 
-Report Text (first 3000 chars):
+Report Text:
 {{TEXT}}
 
 Structured Data:
@@ -100,23 +93,26 @@ def ocr_image(pil_image):
     results = OCR_READER.readtext(img_np, detail=0, paragraph=True)
     return "\n".join(results)
 
-def call_groq(prompt, model=EXTRACTION_MODEL):
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = { "model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3, "max_tokens": 2000, "n": 1 }
+def call_groq(prompt, model="llama-3.3-70b-versatile"):
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": 2000
+    }
     try:
-        resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=40)
+        resp = requests.post(GROQ_URL, json=payload, headers={"Authorization": f"Bearer {GROQ_API_KEY}"}, timeout=40)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+    except: return "Error generating response."
 
 def extract_structured(text):
-    prompt = EXTRACT_PROMPT.replace("{{TEXT}}", text[:10000])
-    result = call_groq(prompt, EXTRACTION_MODEL)
+    prompt = EXTRACT_PROMPT.replace("{{TEXT}}", text[:15000])
+    result = call_groq(prompt, "llama-3.1-8b-instant")
     try: data = json.loads(result)
     except: data = {"error": "Parse failed", "raw": result}
     for t in data.get("tests", []):
-        t.setdefault("name", "Unknown Test")
+        t.setdefault("name", "Unknown")
         t.setdefault("value", "N/A")
         t.setdefault("unit", "")
         t.setdefault("range", "")
@@ -124,134 +120,174 @@ def extract_structured(text):
     return data
 
 def summarize_report(text, data):
-    prompt = SUMMARY_PROMPT.replace("{{TEXT}}", text[:3000]).replace("{{DATA}}", json.dumps(data, indent=2))
-    return call_groq(prompt, SUMMARY_MODEL)
-
-def dict_to_csv(data):
-    output = io.StringIO()
-    writer = csv.writer(output)
-    for k, v in data.items():
-        if k not in ["tests", "error", "raw"]:
-            writer.writerow([k.replace("_", " ").title(), v])
-    writer.writerow([])
-    writer.writerow(["Test", "Value", "Unit", "Range", "Flag"])
-    for t in data.get("tests", []):
-        writer.writerow([
-            t.get("name", "Unknown"),
-            t.get("value", "N/A"),
-            t.get("unit", ""),
-            t.get("range", ""),
-            t.get("flag", "Unknown")
-        ])
-    return output.getvalue()
+    prompt = SUMMARY_PROMPT.replace("{{TEXT}}", text[:4000]).replace("{{DATA}}", json.dumps(data, indent=2))
+    return call_groq(prompt)
 
 # ================================
-# 4. PDF: STRUCTURED SECTIONS
+# 4. VISUALIZATIONS
 # ================================
-def generate_pdf_report(p_name, p_age, p_gender, summary_text):
+def create_plots(df):
+    # 1. Bar Chart
+    flag_counts = df['Flag'].value_counts()
+    fig_bar = px.bar(
+        x=flag_counts.index, y=flag_counts.values,
+        color=flag_counts.index,
+        color_discrete_map={'Normal': '#2E8B57', 'High': '#DC143C', 'Low': '#FF8C00'},
+        title="Test Results Overview",
+        labels={'x': 'Status', 'y': 'Count'}
+    )
+    fig_bar.update_layout(showlegend=False, height=300)
+
+    # 2. Gauge Charts
+    gauges = []
+    for _, row in df.iterrows():
+        if 'Glucose' in row['name']:
+            v, low, high = row['value'], *parse_range(row['range'])
+            gauges.append(get_gauge(v, low, high, "Glucose", "mg/dL"))
+        if 'HbA1c' in row['name']:
+            gauges.append(get_gauge(row['value'], 0, 5.7, "HbA1c", "%"))
+        if 'Cholesterol' in row['name']:
+            gauges.append(get_gauge(row['value'], 0, 200, "Cholesterol", "mg/dL"))
+
+    # 3. Risk Radar
+    radar_data = []
+    categories = ['Diabetes', 'Heart', 'Liver', 'Anemia']
+    values = [0, 0, 0, 0]
+    for i, cat in enumerate(categories):
+        if any(cat.lower() in t['name'].lower() for t in df.to_dict('records')):
+            values[i] = 3 if df[df['name'].str.contains(cat, case=False)]['flag'].iloc[0] != 'Normal' else 1
+    fig_radar = go.Figure(data=go.Scatterpolar(r=values, theta=categories, fill='toself'))
+    fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 3])), showlegend=False, height=300)
+
+    return fig_bar, gauges, fig_radar
+
+def parse_range(range_str):
+    nums = re.findall(r"[\d.]+", range_str)
+    return [float(n) for n in nums] if nums else [0, 100]
+
+def get_gauge(value, low, high, title, unit):
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=value,
+        title={'text': f"{title} ({unit})"},
+        gauge={
+            'axis': {'range': [None, max(high*1.3, value*1.3)]},
+            'bar': {'color': "red" if value > high else "orange" if value < low else "green"},
+            'steps': [{'range': [0, low], 'color': "lightgray"}, {'range': [low, high], 'color': "yellow"}]
+        }
+    ))
+    fig.update_layout(height=220, margin=dict(t=40, b=0))
+    return fig
+
+# ================================
+# 5. PDF WITH PLOTS
+# ================================
+def add_plot_to_pdf(fig, story, width=5*inch, height=2.5*inch):
+    img_data = fig.to_image(format="png")
+    story.append(RLImage(io.BytesIO(img_data), width=width, height=height))
+    story.append(Spacer(1, 0.2*inch))
+
+def generate_pdf_report(p_name, p_age, p_gender, summary_text, fig_bar, gauges, fig_radar):
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.8*inch, bottomMargin=0.8*inch, leftMargin=0.8*inch, rightMargin=0.8*inch)
+    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.8*inch)
     styles = getSampleStyleSheet()
-
     title = ParagraphStyle('Title', parent=styles['Title'], fontSize=20, spaceAfter=15, textColor=colors.HexColor('#1E90FF'), alignment=1)
-    heading = ParagraphStyle('Heading', parent=styles['Heading2'], fontSize=14, spaceAfter=10, textColor=colors.HexColor('#2E8B57'))
-    normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=11, spaceAfter=8, leading=14)
+    heading = ParagraphStyle('Heading', parent=styles['Heading2'], fontSize=14, spaceAfter=10)
+    normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=11, spaceAfter=8)
     small = ParagraphStyle('Small', parent=styles['Normal'], fontSize=9, textColor=colors.gray)
 
     story = []
-
-    # Header
     story.append(Paragraph("MediReport AI", title))
-    story.append(Paragraph(f"Generated on {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", small))
-    story.append(Spacer(1, 0.2*inch))
+    story.append(Paragraph(f"Generated on {datetime.now().strftime('%B %d, %Y')}", small))
+    story.append(Spacer(1, 0.3*inch))
 
-    # Patient Info
     story.append(Paragraph("Patient Summary Report", heading))
-    info = f"<b>Name:</b> {p_name} &nbsp;&nbsp;&nbsp; <b>Age:</b> {p_age} &nbsp;&nbsp;&nbsp; <b>Gender:</b> {p_gender}"
+    info = f"<b>Name:</b> {p_name} &nbsp;&nbsp; <b>Age:</b> {p_age} &nbsp;&nbsp; <b>Gender:</b> {p_gender}"
     story.append(Paragraph(info, normal))
-    story.append(HRFlowable(width="100%", thickness=1, lineCap='round', color=colors.lightgrey, spaceBefore=10, spaceAfter=10))
+    story.append(Spacer(1, 0.3*inch))
 
-    # Summary Sections
+    # Visualizations
+    add_plot_to_pdf(fig_bar, story)
+    gauge_row = [RLImage(io.BytesIO(g.to_image(format="png")), width=1.8*inch, height=1.8*inch) for g in gauges[:3]]
+    story.append(Table([gauge_row], colWidths=[1.9*inch]*3))
+    story.append(Spacer(1, 0.3*inch))
+    add_plot_to_pdf(fig_radar, story, width=4*inch, height=3*inch)
+
+    # Summary
     sections = re.split(r'##\s+', summary_text)
-    for section in sections[1:]:  # Skip empty first
-        lines = section.strip().split('\n')
-        if not lines: continue
-        title_text = lines[0].strip()
-        content = '\n'.join(lines[1:]).strip()
-        
-        story.append(Paragraph(title_text, heading))
-        clean = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', content)
-        clean = html.escape(clean)
-        clean = clean.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
-        clean = clean.replace('•', '<br/>• ').replace('\n', '<br/>')
-        story.append(Paragraph(f"<font name='Helvetica'>{clean}</font>", normal))
-        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.lightgrey, spaceBefore=8, spaceAfter=8))
+    for sec in sections[1:]:
+        lines = sec.strip().split('\n', 1)
+        if len(lines) < 2: continue
+        story.append(Paragraph(lines[0].strip(), heading))
+        clean = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', lines[1])
+        clean = html.escape(clean).replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
+        story.append(Paragraph(clean, normal))
+        story.append(Spacer(1, 0.2*inch))
 
-    # Footer
-    story.append(Paragraph("<i>This is an AI-generated report for informational purposes only. Please consult your physician.</i>", small))
-
-    try: doc.build(story)
-    except: return None
+    story.append(Paragraph("<i>AI-generated report. Consult your doctor.</i>", small))
+    doc.build(story)
     buffer.seek(0)
     return buffer
 
 # ================================
-# 5. UI – STRUCTURED DASHBOARD
+# 6. UI
 # ================================
 st.set_page_config(page_title="MediReport AI", layout="wide", page_icon="medical")
 st.title("MediReport AI")
-st.markdown("### *Your Personal AI Pathologist*")
-st.caption("Upload report → Get **structured insights + printable PDF**")
+st.markdown("### *Your AI Pathologist with Visual Insights*")
 
-uploaded = st.file_uploader("Upload Report", type=["pdf", "png", "jpg", "jpeg"])
+uploaded = st.file_uploader("Upload PDF Report", type=["pdf"])
 
 if uploaded:
-    with st.spinner("Reading report..."):
-        raw_text = extract_text_from_pdf(uploaded.read()) if uploaded.type == "application/pdf" else ocr_image(Image.open(uploaded))
+    with st.spinner("Reading PDF..."):
+        raw_text = extract_text_from_pdf(uploaded.read())
     if not raw_text.strip():
-        st.error("No text found.")
+        st.error("No text found. Try a clearer scan.")
         st.stop()
 
     with st.spinner("Analyzing..."):
         structured = extract_structured(raw_text)
         summary = summarize_report(raw_text, structured)
 
+    # Convert to DataFrame
+    df = pd.DataFrame(structured.get("tests", []))
+    if df.empty:
+        st.error("No test data found.")
+        st.stop()
+
     p_name = structured.get("patient_name", "Patient")
     p_age = structured.get("age", "N/A")
     p_gender = structured.get("gender", "N/A")
 
-    # STRUCTURED DASHBOARD
-    st.markdown("## Patient Summary Report")
-    st.markdown(f"**Name:** {p_name} &nbsp;&nbsp; **Age:** {p_age} &nbsp;&nbsp; **Gender:** {p_gender}")
-    st.markdown("---")
+    # Visualizations
+    fig_bar, gauges, fig_radar = create_plots(df)
 
-    # Split and display sections
-    sections = re.split(r'##\s+', summary)
-    for section in sections[1:]:
-        lines = section.strip().split('\n', 1)
-        if len(lines) < 2: continue
-        title = lines[0].strip()
-        content = lines[1].strip()
-        st.markdown(f"### {title}")
-        st.markdown(content)
-        st.markdown("---")
-
-    # DOWNLOADS
-    col1, col2 = st.columns([1, 1])
+    # Dashboard
+    col1, col2 = st.columns([1.4, 1])
     with col1:
-        st.download_button("Download CSV", dict_to_csv(structured), "report.csv", "text/csv")
+        st.plotly_chart(fig_bar, use_container_width=True)
+        for g in gauges:
+            st.plotly_chart(g, use_container_width=True)
+        st.plotly_chart(fig_radar, use_container_width=True)
     with col2:
-        pdf = generate_pdf_report(p_name, p_age, p_gender, summary)
+        st.markdown("## Health Summary")
+        sections = re.split(r'##\s+', summary)
+        for sec in sections[1:]:
+            lines = sec.strip().split('\n', 1)
+            if len(lines) < 2: continue
+            st.markdown(f"### {lines[0].strip()}")
+            st.markdown(lines[1].strip())
+
+    # Downloads
+    col_a, col_b = st.columns(2)
+    with col_a:
+        csv_data = df.to_csv(index=False).encode()
+        st.download_button("Download CSV", csv_data, "report.csv", "text/csv")
+    with col_b:
+        pdf = generate_pdf_report(p_name, p_age, p_gender, summary, fig_bar, gauges, fig_radar)
         if pdf:
             safe_name = re.sub(r'\W+', '_', p_name)
-            st.download_button(
-                "Download PDF Report",
-                pdf,
-                f"Health_Report_{safe_name}_{datetime.now().strftime('%Y%m%d')}.pdf",
-                "application/pdf"
-            )
-        else:
-            st.error("PDF failed.")
+            st.download_button("Download PDF Report", pdf, f"Health_Report_{safe_name}.pdf", "application/pdf")
 
-# FOOTER
-st.markdown("**Powered by Groq AI • ReportLab** | *Consult your doctor.* | November 11, 2025")
+st.markdown("---")
+st.markdown("**Groq AI • Plotly • ReportLab** | *Consult your doctor.*")
