@@ -1,6 +1,6 @@
 # app.py
-# MediReport AI – Clean, Full-Width Summary + Professional PDF
-# No Structured Data | No Sign-off | Full Width | Perfect PDF
+# MediReport AI – Detailed, Doctor-Recommended Summary + Professional PDF
+# No Structured Data | Full Width | Clean PDF | No Sign-off
 
 import streamlit as st
 import fitz
@@ -52,18 +52,19 @@ Text:
 """
 
 SUMMARY_PROMPT = """
-You are a senior physician. Write a **detailed, caring, patient-friendly** summary in **10+ bullet points**.
+You are a senior physician. Write a **detailed, patient-friendly** summary in **15+ bullet points**.
 
 Include:
 - Patient name, age, gender
-- Key abnormalities with **bold values**
-- Plain English explanation
+- Each abnormal test with **bold value**
+- What it means in simple terms
 - Possible causes
 - Lifestyle tips
 - Urgency level
+- **Specific doctor to consult** (e.g., Endocrinologist, Hematologist, Cardiologist)
 - Next steps
 
-Be empathetic and clear. **DO NOT end with "Best Regards" or any sign-off.**
+Use clear bullet points. Be empathetic. **DO NOT end with "Best Regards" or any sign-off.**
 
 Report Text (first 3000 chars):
 {{TEXT}}
@@ -86,7 +87,7 @@ def ocr_image(pil_image):
 
 def call_groq(prompt, model=EXTRACTION_MODEL):
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = { "model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3, "max_tokens": 1500, "n": 1 }
+    payload = { "model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3, "max_tokens": 1800, "n": 1 }
     try:
         resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=40)
         resp.raise_for_status()
@@ -110,7 +111,6 @@ def extract_structured(text):
 def summarize_report(text, data):
     prompt = SUMMARY_PROMPT.replace("{{TEXT}}", text[:3000]).replace("{{DATA}}", json.dumps(data, indent=2))
     summary = call_groq(prompt, SUMMARY_MODEL)
-    # Remove any sign-off
     summary = re.sub(r"Best regards.*$", "", summary, flags=re.I | re.DOTALL).strip()
     return summary
 
@@ -133,9 +133,9 @@ def dict_to_csv(data):
     return output.getvalue()
 
 # ================================
-# 4. PDF: CLEAN, FULL-WIDTH, FROM DASHBOARD
+# 4. PDF: PROFESSIONAL, FROM DASHBOARD
 # ================================
-def generate_pdf_report(p_name, p_age, p_gender, summary_text):
+def generate_pdf_report(p1, p2, p3, summary_text):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.8*inch, bottomMargin=0.8*inch, leftMargin=0.8*inch, rightMargin=0.8*inch)
     styles = getSampleStyleSheet()
@@ -147,18 +147,15 @@ def generate_pdf_report(p_name, p_age, p_gender, summary_text):
 
     story = []
 
-    # Header
     story.append(Paragraph("MediReport AI", title))
     story.append(Paragraph(f"Generated on {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", small))
     story.append(Spacer(1, 0.2*inch))
 
-    # Patient Info
     story.append(Paragraph("Patient Summary Report", heading))
-    info = f"<b>Name:</b> {p_name} &nbsp;&nbsp;&nbsp; <b>Age:</b> {p_age} &nbsp;&nbsp;&nbsp; <b>Gender:</b> {p_gender}"
+    info = f"<b>Name:</b> {p1} &nbsp;&nbsp;&nbsp; <b>Age:</b> {p2} &nbsp;&nbsp;&nbsp; <b>Gender:</b> {p3}"
     story.append(Paragraph(info, normal))
     story.append(Spacer(1, 0.3*inch))
 
-    # Summary – FROM DASHBOARD ONLY
     story.append(Paragraph("Your Health Insights", heading))
     clean = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', summary_text)
     clean = html.escape(clean)
@@ -166,7 +163,6 @@ def generate_pdf_report(p_name, p_age, p_gender, summary_text):
     clean = clean.replace('•', '<br/>• ').replace('\n', '<br/>')
     story.append(Paragraph(f"<font name='Helvetica'>{clean}</font>", normal))
 
-    # Footer
     story.append(Spacer(1, 0.5*inch))
     story.append(Paragraph("<i>This is an AI-generated report for informational purposes only. Please consult your physician.</i>", small))
 
@@ -176,7 +172,7 @@ def generate_pdf_report(p_name, p_age, p_gender, summary_text):
     return buffer
 
 # ================================
-# 5. UI – FULL WIDTH SUMMARY
+# 5. UI – FULL WIDTH
 # ================================
 st.set_page_config(page_title="MediReport AI", layout="wide", page_icon="medical")
 st.title("MediReport AI")
@@ -186,17 +182,16 @@ st.caption("Upload report → Get **detailed insights + printable PDF**")
 uploaded = st.file_uploader("Upload Report", type=["pdf", "png", "jpg", "jpeg"])
 
 if uploaded:
-    with st.spinner("Reading report..."):
+    with st.spinner("Reading..."):
         raw_text = extract_text_from_pdf(uploaded.read()) if uploaded.type == "application/pdf" else ocr_image(Image.open(uploaded))
     if not raw_text.strip():
-        st.error("No text found. Try a clearer scan.")
+        st.error("No text found.")
         st.stop()
 
-    with st.spinner("Analyzing with AI..."):
+    with st.spinner("Analyzing..."):
         structured = extract_structured(raw_text)
-        summary = summarize_report(raw_text, structured)  # ← Dashboard summary
+        summary = summarize_report(raw_text, structured)
 
-    # Extract patient info
     p_name = structured.get("patient_name", "Patient")
     p_age = structured.get("age", "N/A")
     p_gender = structured.get("gender", "N/A")
@@ -205,7 +200,6 @@ if uploaded:
     st.markdown("## Your Health Summary")
     st.markdown(summary)
 
-    # DOWNLOADS
     col1, col2 = st.columns([1, 1])
     with col1:
         st.download_button("Download CSV", dict_to_csv(structured), "report.csv", "text/csv")
@@ -220,8 +214,7 @@ if uploaded:
                 "application/pdf"
             )
         else:
-            st.error("PDF generation failed.")
+            st.error("PDF failed.")
 
-# FOOTER
 st.markdown("---")
 st.markdown("**Powered by Groq AI • ReportLab** | *Consult your doctor.* | November 11, 2025")
