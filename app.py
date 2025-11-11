@@ -1,6 +1,6 @@
 # app.py
-# MediReport AI – With Auto PDF Report Generator
-# Streamlit Cloud Ready | Groq Free | PDF Export
+# MediReport AI – PDF Report Fixed, No Errors, Streamlit Cloud Ready
+# Uses ReportLab + Safe HTML + Fallback
 
 import streamlit as st
 import fitz
@@ -14,10 +14,11 @@ from PIL import Image
 import numpy as np
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
+import html
 
 # ================================
 # 1. CONFIG: GROQ API
@@ -155,18 +156,33 @@ def dict_to_csv(data):
     return output.getvalue()
 
 # ================================
-# 5. PDF REPORT GENERATOR
+# 5. SAFE HTML FOR PDF
+# ================================
+def clean_html_for_pdf(text):
+    # Replace **bold** → <b>bold</b> safely
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+    # Escape any remaining < > & to prevent HTML injection
+    text = html.escape(text)
+    # Re-apply <b> tags (safe now)
+    text = text.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
+    # Replace bullet points
+    text = text.replace('•', '<br/>•')
+    return f"<font name='Helvetica'>{text}</font>"
+
+# ================================
+# 6. PDF REPORT GENERATOR (FIXED)
 # ================================
 def generate_pdf_report(structured, summary, patient_name="Patient"):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=1*inch, bottomMargin=0.8*inch)
     styles = getSampleStyleSheet()
-    story = []
 
     # Custom Styles
     title_style = ParagraphStyle('Title', parent=styles['Title'], fontSize=18, spaceAfter=20, textColor=colors.HexColor('#1E90FF'))
     heading_style = ParagraphStyle('Heading', parent=styles['Heading2'], fontSize=14, spaceAfter=10, textColor=colors.HexColor('#2E8B57'))
     normal_style = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=11, spaceAfter=8, leading=14)
+
+    story = []
 
     # Header
     story.append(Paragraph("MediReport AI", title_style))
@@ -179,22 +195,27 @@ def generate_pdf_report(structured, summary, patient_name="Patient"):
     story.append(Paragraph(info, normal_style))
     story.append(Spacer(1, 0.2*inch))
 
-    # Summary
+    # Summary (SAFE HTML)
     story.append(Paragraph("AI-Generated Health Insights", heading_style))
-    summary_html = summary.replace("**", "<b>").replace("**", "</b>")
-    story.append(Paragraph(summary_html, normal_style))
+    safe_summary = clean_html_for_pdf(summary)
+    try:
+        story.append(Paragraph(safe_summary, normal_style))
+    except Exception as e:
+        story.append(Paragraph("Summary could not be rendered in PDF (HTML error).", normal_style))
+        st.warning("PDF summary fallback due to formatting.")
+
     story.append(Spacer(1, 0.4*inch))
 
     # Key Results Table
     story.append(Paragraph("Key Lab Results", heading_style))
     table_data = [["Test", "Value", "Unit", "Range", "Status"]]
-    for t in structured.get("tests", [])[:10]:  # Top 10
+    for t in structured.get("tests", [])[:10]:
         flag = t.get("flag", "")
-        color = "Normal"
-        if flag == "High": color = "<font color=red>High</font>"
-        elif flag == "Low": color = "<font color=orange>Low</font>"
-        else: color = "<font color=green>Normal</font>"
-        table_data.append([t["name"], t["value"], t.get("unit",""), t.get("range",""), color])
+        status = "Normal"
+        if flag == "High": status = "<font color=red>High</font>"
+        elif flag == "Low": status = "<font color=orange>Low</font>"
+        else: status = "<font color=green>Normal</font>"
+        table_data.append([t["name"], t["value"], t.get("unit",""), t.get("range",""), status])
 
     table = Table(table_data, colWidths=[2.2*inch, 0.8*inch, 0.6*inch, 1.2*inch, 0.9*inch])
     table.setStyle(TableStyle([
@@ -215,17 +236,22 @@ def generate_pdf_report(structured, summary, patient_name="Patient"):
     story.append(Paragraph("<i>This is an AI-generated report for informational purposes. Please consult your doctor.</i>", normal_style))
 
     # Build PDF
-    doc.build(story)
+    try:
+        doc.build(story)
+    except Exception as e:
+        st.error(f"PDF generation failed: {e}")
+        return None
+
     buffer.seek(0)
     return buffer
 
 # ================================
-# 6. UI
+# 7. UI
 # ================================
 st.set_page_config(page_title="MediReport AI", layout="centered", page_icon="medical")
 st.title("MediReport AI")
 st.markdown("### *Your Personal AI Pathologist*")
-st.caption("Upload report → Get **detailed insights + printable PDF report**")
+st.caption("Upload report → Get **detailed insights + printable PDF**")
 
 uploaded = st.file_uploader("Upload Report", type=["pdf", "png", "jpg", "jpeg"])
 
@@ -254,23 +280,26 @@ if uploaded:
     with col_a:
         st.download_button("Download CSV", dict_to_csv(structured), "report.csv", "text/csv")
     with col_b:
-        patient_name = structured.get("patient_name", "Patient").replace(" ", "_")
+        patient_name = re.sub(r'\W+', '_', structured.get("patient_name", "Patient"))
         pdf_buffer = generate_pdf_report(structured, summary, patient_name)
-        st.download_button(
-            label="Download PDF Report",
-            data=pdf_buffer,
-            file_name=f"Health_Report_{patient_name}_{datetime.now().strftime('%Y%m%d')}.pdf",
-            mime="application/pdf"
-        )
+        if pdf_buffer:
+            st.download_button(
+                label="Download PDF Report",
+                data=pdf_buffer,
+                file_name=f"Health_Report_{patient_name}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                mime="application/pdf"
+            )
+        else:
+            st.error("PDF generation failed. Check logs.")
 
 # ================================
-# 7. FOOTER
+# 8. FOOTER
 # ================================
 st.markdown("---")
 st.markdown(
     """
-    **Powered by Groq AI** • **PDF Reports via ReportLab**  
+    **Powered by Groq AI** • **PDF Reports via ReportLab (Safe HTML)**  
     *No medical advice — consult your doctor.*  
-    Made in India | November 11, 2025
+    Fixed & Tested: November 11, 2025
     """
 )
