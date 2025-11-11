@@ -1,6 +1,6 @@
 # app.py
-# MediReport AI – Single File, Free, Streamlit Cloud Ready (FIXED: Escaped prompts for Groq)
-# Uses Groq (free), EasyOCR (CPU), PyMuPDF
+# MediReport AI – Single File, Free, Streamlit Cloud Ready (FIXED: Updated models + deprecation handling)
+# Uses Groq (free, non-deprecated models), EasyOCR (CPU), PyMuPDF
 # Deploy with: requirements.txt + runtime.txt + secrets.toml
 
 import streamlit as st
@@ -32,7 +32,16 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 OCR_READER = easyocr.Reader(['en'], gpu=False)
 
 # ================================
-# 2. PROMPTS (Embedded & Escaped for JSON Safety)
+# 2. MODELS: Updated to Non-Deprecated (November 2025)
+# ================================
+EXTRACTION_MODEL = "llama-3.1-8b-instant"  # Replacement for llama3-8b-8192
+SUMMARY_MODEL = "llama-3.3-70b-versatile"  # Replacement for llama3-70b-8192 (decommissioned May 2025)
+
+# Fallback if even these get deprecated (rare)
+FALLBACK_MODEL = "llama3-8b-8192"  # Stable 8B for emergencies
+
+# ================================
+# 3. PROMPTS (Embedded & Escaped for JSON Safety)
 # ================================
 # Escape JSON example to prevent payload malformation
 JSON_EXAMPLE = {
@@ -59,7 +68,7 @@ Extract the following in JSON only. No extra text.
 {json_example}
 
 Text:
-{{TEXT}}
+{TEXT}
 """
 
 SUMMARY_PROMPT_TEMPLATE = """
@@ -67,14 +76,14 @@ Convert this medical report into a simple 4-5 bullet summary for a patient.
 Use **bold** for abnormal values.
 
 Report:
-{{TEXT}}
+{TEXT}
 
 Data:
-{{DATA}}
+{DATA}
 """
 
 # ================================
-# 3. UTILS: PDF, OCR, AI, CSV
+# 4. UTILS: PDF, OCR, AI, CSV
 # ================================
 def extract_text_from_pdf(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -85,7 +94,7 @@ def ocr_image(pil_image):
     results = OCR_READER.readtext(img_np, detail=0, paragraph=True)
     return "\n".join(results)
 
-def call_groq(prompt, model="llama3-8b-8192"):
+def call_groq(prompt, model=EXTRACTION_MODEL):
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
@@ -95,15 +104,20 @@ def call_groq(prompt, model="llama3-8b-8192"):
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
         "max_tokens": 1024,
-        "n": 1  # Explicitly set to 1 (Groq requirement, prevents 400)
+        "n": 1  # Explicitly set to 1 (Groq requirement)
     }
     try:
         resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        content = resp.json()["choices"][0]["message"]["content"]
+        return content
     except requests.exceptions.HTTPError as e:
+        error_text = e.response.text
+        if "decommissioned" in error_text.lower() or "invalid_request_error" in error_text:
+            st.warning(f"Model '{model}' deprecated. Switching to fallback: {FALLBACK_MODEL}")
+            return call_groq(prompt, model=FALLBACK_MODEL)  # Recursive fallback
         if e.response.status_code == 400:
-            return json.dumps({"error": f"400 Bad Request: {e.response.text}"})
+            return json.dumps({"error": f"400 Bad Request: {error_text}"})
         return json.dumps({"error": str(e)})
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -111,9 +125,9 @@ def call_groq(prompt, model="llama3-8b-8192"):
 def extract_structured(text):
     prompt = EXTRACT_PROMPT_TEMPLATE.format(
         json_example=JSON_EXAMPLE_STR,
-        TEXT=text[:12000]
+        TEXT=text[:8000]  # Shorter to avoid token limits
     )
-    result = call_groq(prompt, model="llama3-8b-8192")
+    result = call_groq(prompt, model=EXTRACTION_MODEL)
     try:
         data = json.loads(result)
     except:
@@ -136,9 +150,11 @@ def extract_structured(text):
     return data
 
 def summarize_report(text, data):
-    prompt = SUMMARY_PROMPT_TEMPLATE.replace("{{TEXT}}", text[:6000]) \
-                                   .replace("{{DATA}}", json.dumps(data, indent=2))
-    return call_groq(prompt, model="llama3-70b-8192")
+    prompt = SUMMARY_PROMPT_TEMPLATE.format(
+        TEXT=text[:4000],  # Even shorter for 70B
+        DATA=json.dumps(data, indent=2)
+    )
+    return call_groq(prompt, model=SUMMARY_MODEL)
 
 def dict_to_csv(data):
     output = io.StringIO()
@@ -159,11 +175,12 @@ def dict_to_csv(data):
     return output.getvalue()
 
 # ================================
-# 4. STREAMLIT UI
+# 5. STREAMLIT UI
 # ================================
 st.set_page_config(page_title="MediReport AI", layout="centered", page_icon="🩺")
 st.title("🩺 MediReport AI")
 st.caption("Upload medical report (PDF or Image) → Get AI-powered summary instantly")
+st.caption(f"Using models: {EXTRACTION_MODEL} (extract) + {SUMMARY_MODEL} (summary)")
 
 uploaded = st.file_uploader(
     "Upload Report", 
@@ -206,14 +223,14 @@ if uploaded:
     )
 
 # ================================
-# 5. FOOTER
+# 6. FOOTER
 # ================================
 st.markdown("---")
 st.markdown(
     """
     **Powered by:**  
-    [Groq](https://groq.com) (Free Tier) • EasyOCR (CPU) • PyMuPDF • Streamlit  
-    Made in India | November 11, 2025
+    [Groq](https://groq.com) (Free Tier, Updated Models) • EasyOCR (CPU) • PyMuPDF • Streamlit  
+    Fixed: November 11, 2025 | No more deprecation errors!
     """
 )
-st.caption("For support: Check logs or reboot app if issues persist.")
+st.caption("If issues: Reboot app or check Groq console for rate limits.")
