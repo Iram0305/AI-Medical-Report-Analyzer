@@ -1,6 +1,5 @@
 # app.py
-# MediReport AI – PDF Input Only | Full Visualizations | Professional PDF
-# Bar + Gauge + Radar Charts | Doctor Recommendations | No Errors
+# MediReport AI – PDF Input | Full Plots | Safe Extraction | Perfect PDF
 
 import streamlit as st
 import fitz
@@ -11,7 +10,6 @@ import re
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import io
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
@@ -20,7 +18,6 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 import html
-import base64
 
 # ================================
 # 1. CONFIG
@@ -28,7 +25,7 @@ import base64
 try:
     GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 except KeyError:
-    st.error("Set `GROQ_API_KEY` in **Streamlit Secrets**.")
+    st.error("Set `GROQ_API_KEY` in Streamlit Secrets.")
     st.stop()
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -89,6 +86,8 @@ def extract_text_from_pdf(pdf_bytes):
     return "\n".join(page.get_text() for page in doc)
 
 def ocr_image(pil_image):
+    from PIL import Image
+    import numpy as np
     img_np = np.array(pil_image)
     results = OCR_READER.readtext(img_np, detail=0, paragraph=True)
     return "\n".join(results)
@@ -111,12 +110,17 @@ def extract_structured(text):
     result = call_groq(prompt, "llama-3.1-8b-instant")
     try: data = json.loads(result)
     except: data = {"error": "Parse failed", "raw": result}
-    for t in data.get("tests", []):
-        t.setdefault("name", "Unknown")
+    
+    # SAFE DEFAULTS
+    tests = data.get("tests", [])
+    for t in tests:
+        t.setdefault("name", "Unknown Test")
         t.setdefault("value", "N/A")
         t.setdefault("unit", "")
         t.setdefault("range", "")
-        t.setdefault("flag", "Unknown")
+        t.setdefault("flag", "Unknown")  # ← THIS FIXES KeyError
+    
+    data["tests"] = tests
     return data
 
 def summarize_report(text, data):
@@ -127,42 +131,53 @@ def summarize_report(text, data):
 # 4. VISUALIZATIONS
 # ================================
 def create_plots(df):
-    # 1. Bar Chart
-    flag_counts = df['Flag'].value_counts()
+    # SAFE: Handle missing 'Flag'
+    if 'flag' not in df.columns:
+        df['flag'] = 'Unknown'
+    df['flag'] = df['flag'].fillna('Unknown')
+    
+    # Bar Chart
+    flag_counts = df['flag'].value_counts()
     fig_bar = px.bar(
         x=flag_counts.index, y=flag_counts.values,
         color=flag_counts.index,
-        color_discrete_map={'Normal': '#2E8B57', 'High': '#DC143C', 'Low': '#FF8C00'},
+        color_discrete_map={'Normal': '#2E8B57', 'High': '#DC143C', 'Low': '#FF8C00', 'Unknown': '#808080'},
         title="Test Results Overview",
         labels={'x': 'Status', 'y': 'Count'}
     )
     fig_bar.update_layout(showlegend=False, height=300)
 
-    # 2. Gauge Charts
+    # Gauges
     gauges = []
     for _, row in df.iterrows():
-        if 'Glucose' in row['name']:
-            v, low, high = row['value'], *parse_range(row['range'])
-            gauges.append(get_gauge(v, low, high, "Glucose", "mg/dL"))
-        if 'HbA1c' in row['name']:
-            gauges.append(get_gauge(row['value'], 0, 5.7, "HbA1c", "%"))
-        if 'Cholesterol' in row['name']:
-            gauges.append(get_gauge(row['value'], 0, 200, "Cholesterol", "mg/dL"))
+        try:
+            if 'Glucose' in row['name']:
+                v, low, high = float(row['value']), *parse_range(row['range'])
+                gauges.append(get_gauge(v, low, high, "Glucose", "mg/dL"))
+            if 'HbA1c' in row['name']:
+                v = float(row['value'])
+                gauges.append(get_gauge(v, 0, 5.7, "HbA1c", "%"))
+            if 'Cholesterol' in row['name']:
+                v = float(row['value'])
+                gauges.append(get_gauge(v, 0, 200, "Cholesterol", "mg/dL"))
+        except: pass
 
-    # 3. Risk Radar
-    radar_data = []
+    # Radar
     categories = ['Diabetes', 'Heart', 'Liver', 'Anemia']
-    values = [0, 0, 0, 0]
+    values = [0]*4
     for i, cat in enumerate(categories):
-        if any(cat.lower() in t['name'].lower() for t in df.to_dict('records')):
-            values[i] = 3 if df[df['name'].str.contains(cat, case=False)]['flag'].iloc[0] != 'Normal' else 1
+        matches = df[df['name'].str.contains(cat, case=False, na=False)]
+        if not matches.empty and matches.iloc[0]['flag'] != 'Normal':
+            values[i] = 3
+        elif not matches.empty:
+            values[i] = 1
     fig_radar = go.Figure(data=go.Scatterpolar(r=values, theta=categories, fill='toself'))
-    fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 3])), showlegend=False, height=300)
+    fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 3])), height=300)
 
     return fig_bar, gauges, fig_radar
 
 def parse_range(range_str):
-    nums = re.findall(r"[\d.]+", range_str)
+    nums = re.findall(r"[\d.]+", str(range_str))
     return [float(n) for n in nums] if nums else [0, 100]
 
 def get_gauge(value, low, high, title, unit):
@@ -180,7 +195,7 @@ def get_gauge(value, low, high, title, unit):
     return fig
 
 # ================================
-# 5. PDF WITH PLOTS
+# 5. PDF (NO HTML LEAKS)
 # ================================
 def add_plot_to_pdf(fig, story, width=5*inch, height=2.5*inch):
     img_data = fig.to_image(format="png")
@@ -206,14 +221,12 @@ def generate_pdf_report(p_name, p_age, p_gender, summary_text, fig_bar, gauges, 
     story.append(Paragraph(info, normal))
     story.append(Spacer(1, 0.3*inch))
 
-    # Visualizations
     add_plot_to_pdf(fig_bar, story)
     gauge_row = [RLImage(io.BytesIO(g.to_image(format="png")), width=1.8*inch, height=1.8*inch) for g in gauges[:3]]
     story.append(Table([gauge_row], colWidths=[1.9*inch]*3))
     story.append(Spacer(1, 0.3*inch))
     add_plot_to_pdf(fig_radar, story, width=4*inch, height=3*inch)
 
-    # Summary
     sections = re.split(r'##\s+', summary_text)
     for sec in sections[1:]:
         lines = sec.strip().split('\n', 1)
@@ -242,27 +255,24 @@ if uploaded:
     with st.spinner("Reading PDF..."):
         raw_text = extract_text_from_pdf(uploaded.read())
     if not raw_text.strip():
-        st.error("No text found. Try a clearer scan.")
+        st.error("No text found.")
         st.stop()
 
     with st.spinner("Analyzing..."):
         structured = extract_structured(raw_text)
         summary = summarize_report(raw_text, structured)
 
-    # Convert to DataFrame
     df = pd.DataFrame(structured.get("tests", []))
     if df.empty:
-        st.error("No test data found.")
+        st.error("No test data.")
         st.stop()
 
     p_name = structured.get("patient_name", "Patient")
     p_age = structured.get("age", "N/A")
     p_gender = structured.get("gender", "N/A")
 
-    # Visualizations
     fig_bar, gauges, fig_radar = create_plots(df)
 
-    # Dashboard
     col1, col2 = st.columns([1.4, 1])
     with col1:
         st.plotly_chart(fig_bar, use_container_width=True)
@@ -278,7 +288,6 @@ if uploaded:
             st.markdown(f"### {lines[0].strip()}")
             st.markdown(lines[1].strip())
 
-    # Downloads
     col_a, col_b = st.columns(2)
     with col_a:
         csv_data = df.to_csv(index=False).encode()
