@@ -1,5 +1,6 @@
 # app.py
-# MediReport AI – PDF Uses Dashboard Summary Only | No Errors | Professional
+# MediReport AI – Clean, Full-Width Summary + Professional PDF
+# No Structured Data | No Sign-off | Full Width | Perfect PDF
 
 import streamlit as st
 import fitz
@@ -13,7 +14,7 @@ from PIL import Image
 import numpy as np
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
@@ -25,7 +26,7 @@ import html
 try:
     GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 except KeyError:
-    st.error("Set `GROQ_API_KEY` in Streamlit Secrets.")
+    st.error("Set `GROQ_API_KEY` in **Streamlit Secrets**.")
     st.stop()
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -62,7 +63,7 @@ Include:
 - Urgency level
 - Next steps
 
-Be empathetic and clear.
+Be empathetic and clear. **DO NOT end with "Best Regards" or any sign-off.**
 
 Report Text (first 3000 chars):
 {{TEXT}}
@@ -98,38 +99,29 @@ def extract_structured(text):
     result = call_groq(prompt, EXTRACTION_MODEL)
     try: data = json.loads(result)
     except: data = {"error": "Parse failed", "raw": result}
-    # SAFE: Ensure every test has required keys
     for t in data.get("tests", []):
         t.setdefault("name", "Unknown Test")
         t.setdefault("value", "N/A")
         t.setdefault("unit", "")
         t.setdefault("range", "")
         t.setdefault("flag", "Unknown")
-        # Auto-flag if missing
-        if t["flag"] == "":
-            try:
-                val = float(re.search(r"[\d.]+", t["value"]).group())
-                rng = re.findall(r"[\d.]+", t["range"])
-                if len(rng) >= 2:
-                    low, high = float(rng[0]), float(rng[-1])
-                    t["flag"] = "High" if val > high else "Low" if val < low else "Normal"
-            except: t["flag"] = "Unknown"
     return data
 
 def summarize_report(text, data):
     prompt = SUMMARY_PROMPT.replace("{{TEXT}}", text[:3000]).replace("{{DATA}}", json.dumps(data, indent=2))
-    return call_groq(prompt, SUMMARY_MODEL)
+    summary = call_groq(prompt, SUMMARY_MODEL)
+    # Remove any sign-off
+    summary = re.sub(r"Best regards.*$", "", summary, flags=re.I | re.DOTALL).strip()
+    return summary
 
 def dict_to_csv(data):
     output = io.StringIO()
     writer = csv.writer(output)
-    # Patient Info
     for k, v in data.items():
         if k not in ["tests", "error", "raw"]:
             writer.writerow([k.replace("_", " ").title(), v])
     writer.writerow([])
     writer.writerow(["Test", "Value", "Unit", "Range", "Flag"])
-    # SAFE: Use .get() to avoid KeyError
     for t in data.get("tests", []):
         writer.writerow([
             t.get("name", "Unknown"),
@@ -141,16 +133,16 @@ def dict_to_csv(data):
     return output.getvalue()
 
 # ================================
-# 4. PDF: USE DASHBOARD SUMMARY ONLY
+# 4. PDF: CLEAN, FULL-WIDTH, FROM DASHBOARD
 # ================================
-def generate_pdf_report(patient_name, age, gender, summary_text):
+def generate_pdf_report(p_name, p_age, p_gender, summary_text):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.8*inch, bottomMargin=0.8*inch, leftMargin=0.8*inch, rightMargin=0.8*inch)
     styles = getSampleStyleSheet()
 
     title = ParagraphStyle('Title', parent=styles['Title'], fontSize=20, spaceAfter=15, textColor=colors.HexColor('#1E90FF'), alignment=1)
-    heading = ParagraphStyle('Heading', parent=styles['Heading2'], fontSize=14, spaceAfter=8, textColor=colors.HexColor('#2E8B57'))
-    normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=11, spaceAfter=6, leading=14)
+    heading = ParagraphStyle('Heading', parent=styles['Heading2'], fontSize=14, spaceAfter=10, textColor=colors.HexColor('#2E8B57'))
+    normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=11, spaceAfter=8, leading=14)
     small = ParagraphStyle('Small', parent=styles['Normal'], fontSize=9, textColor=colors.gray)
 
     story = []
@@ -162,7 +154,7 @@ def generate_pdf_report(patient_name, age, gender, summary_text):
 
     # Patient Info
     story.append(Paragraph("Patient Summary Report", heading))
-    info = f"<b>Name:</b> {patient_name} &nbsp;&nbsp;&nbsp; <b>Age:</b> {age} &nbsp;&nbsp;&nbsp; <b>Gender:</b> {gender}"
+    info = f"<b>Name:</b> {p_name} &nbsp;&nbsp;&nbsp; <b>Age:</b> {p_age} &nbsp;&nbsp;&nbsp; <b>Gender:</b> {p_gender}"
     story.append(Paragraph(info, normal))
     story.append(Spacer(1, 0.3*inch))
 
@@ -184,43 +176,41 @@ def generate_pdf_report(patient_name, age, gender, summary_text):
     return buffer
 
 # ================================
-# 5. UI
+# 5. UI – FULL WIDTH SUMMARY
 # ================================
-st.set_page_config(page_title="MediReport AI", layout="centered", page_icon="medical")
+st.set_page_config(page_title="MediReport AI", layout="wide", page_icon="medical")
 st.title("MediReport AI")
 st.markdown("### *Your Personal AI Pathologist*")
-st.caption("Upload report → Get **detailed insights + professional PDF**")
+st.caption("Upload report → Get **detailed insights + printable PDF**")
 
 uploaded = st.file_uploader("Upload Report", type=["pdf", "png", "jpg", "jpeg"])
 
 if uploaded:
-    with st.spinner("Reading..."):
+    with st.spinner("Reading report..."):
         raw_text = extract_text_from_pdf(uploaded.read()) if uploaded.type == "application/pdf" else ocr_image(Image.open(uploaded))
-    if not raw_text.strip(): st.error("No text."); st.stop()
+    if not raw_text.strip():
+        st.error("No text found. Try a clearer scan.")
+        st.stop()
 
-    with st.spinner("Analyzing..."):
+    with st.spinner("Analyzing with AI..."):
         structured = extract_structured(raw_text)
-        summary = summarize_report(raw_text, structured)  # ← This is shown on dashboard
+        summary = summarize_report(raw_text, structured)  # ← Dashboard summary
 
-    # Extract patient info SAFELY
+    # Extract patient info
     p_name = structured.get("patient_name", "Patient")
     p_age = structured.get("age", "N/A")
     p_gender = structured.get("gender", "N/A")
 
-    col1, col2 = st.columns([1.2, 1.8])
-    with col1:
-        st.subheader("Structured Data")
-        st.json(structured, expanded=False)
-    with col2:
-        st.subheader("Your Health Summary")
-        st.markdown(summary)  # ← Dashboard summary
+    # FULL WIDTH SUMMARY
+    st.markdown("## Your Health Summary")
+    st.markdown(summary)
 
-    # === DOWNLOADS ===
-    col_a, col_b = st.columns(2)
-    with col_a:
+    # DOWNLOADS
+    col1, col2 = st.columns([1, 1])
+    with col1:
         st.download_button("Download CSV", dict_to_csv(structured), "report.csv", "text/csv")
-    with col_b:
-        pdf = generate_pdf_report(p_name, p_age, p_gender, summary)  # ← Uses dashboard summary
+    with col2:
+        pdf = generate_pdf_report(p_name, p_age, p_gender, summary)
         if pdf:
             safe_name = re.sub(r'\W+', '_', p_name)
             st.download_button(
@@ -230,7 +220,8 @@ if uploaded:
                 "application/pdf"
             )
         else:
-            st.error("PDF failed.")
+            st.error("PDF generation failed.")
 
+# FOOTER
 st.markdown("---")
 st.markdown("**Powered by Groq AI • ReportLab** | *Consult your doctor.* | November 11, 2025")
