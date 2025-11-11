@@ -1,6 +1,5 @@
 # app.py
-# MediReport AI – PROFESSIONAL PDF REPORT (Fixed, Beautiful, Patient-Ready)
-# Streamlit Cloud | Groq Free | ReportLab
+# MediReport AI – PDF Uses Dashboard Summary Only | No Errors | Professional
 
 import streamlit as st
 import fitz
@@ -14,12 +13,11 @@ from PIL import Image
 import numpy as np
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 import html
-import textwrap
 
 # ================================
 # 1. CONFIG
@@ -27,24 +25,30 @@ import textwrap
 try:
     GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 except KeyError:
-    st.error("Set `GROQ_API_KEY` in **Streamlit Secrets**.")
+    st.error("Set `GROQ_API_KEY` in Streamlit Secrets.")
     st.stop()
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 OCR_READER = easyocr.Reader(['en'], gpu=False)
 
-# Models
 EXTRACTION_MODEL = "llama-3.1-8b-instant"
 SUMMARY_MODEL = "llama-3.3-70b-versatile"
-FALLBACK_MODEL = "llama3-8b-8192"
 
 # ================================
 # 2. PROMPTS
 # ================================
-JSON_EXAMPLE = { "patient_name": "", "age": "", "gender": "", "report_date": "", "tests": [], "impression": "" }
-JSON_EXAMPLE_STR = json.dumps(JSON_EXAMPLE, indent=2)
+EXTRACT_PROMPT = """
+Extract in JSON only. No extra text.
 
-EXTRACT_PROMPT = f"Extract in JSON only. No extra text.\n\n{JSON_EXAMPLE_STR}\n\nText:\n{{TEXT}}"
+{
+  "patient_name": "", "age": "", "gender": "", "report_date": "",
+  "tests": [{"name": "", "value": "", "unit": "", "range": "", "flag": ""}],
+  "impression": ""
+}
+
+Text:
+{{TEXT}}
+"""
 
 SUMMARY_PROMPT = """
 You are a senior physician. Write a **detailed, caring, patient-friendly** summary in **10+ bullet points**.
@@ -94,15 +98,22 @@ def extract_structured(text):
     result = call_groq(prompt, EXTRACTION_MODEL)
     try: data = json.loads(result)
     except: data = {"error": "Parse failed", "raw": result}
+    # SAFE: Ensure every test has required keys
     for t in data.get("tests", []):
-        try:
-            val = float(re.search(r"[\d.]+", t["value"]).group())
-            rng = re.findall(r"[\d.]+", t["range"] or "")
-            if len(rng) >= 2:
-                low, high = float(rng[0]), float(rng[-1])
-                t["flag"] = "High" if val > high else "Low" if val < low else "Normal"
-            else: t["flag"] = "Normal"
-        except: t["flag"] = "Unknown"
+        t.setdefault("name", "Unknown Test")
+        t.setdefault("value", "N/A")
+        t.setdefault("unit", "")
+        t.setdefault("range", "")
+        t.setdefault("flag", "Unknown")
+        # Auto-flag if missing
+        if t["flag"] == "":
+            try:
+                val = float(re.search(r"[\d.]+", t["value"]).group())
+                rng = re.findall(r"[\d.]+", t["range"])
+                if len(rng) >= 2:
+                    low, high = float(rng[0]), float(rng[-1])
+                    t["flag"] = "High" if val > high else "Low" if val < low else "Normal"
+            except: t["flag"] = "Unknown"
     return data
 
 def summarize_report(text, data):
@@ -112,21 +123,31 @@ def summarize_report(text, data):
 def dict_to_csv(data):
     output = io.StringIO()
     writer = csv.writer(output)
+    # Patient Info
     for k, v in data.items():
-        if k not in ["tests", "error", "raw"]: writer.writerow([k.replace("_", " ").title(), v])
-    writer.writerow([]); writer.writerow(["Test", "Value", "Unit", "Range", "Flag"])
-    for t in data.get("tests", []): writer.writerow([t["name"], t["value"], t.get("unit",""), t.get("range",""), t.get("flag","")])
+        if k not in ["tests", "error", "raw"]:
+            writer.writerow([k.replace("_", " ").title(), v])
+    writer.writerow([])
+    writer.writerow(["Test", "Value", "Unit", "Range", "Flag"])
+    # SAFE: Use .get() to avoid KeyError
+    for t in data.get("tests", []):
+        writer.writerow([
+            t.get("name", "Unknown"),
+            t.get("value", "N/A"),
+            t.get("unit", ""),
+            t.get("range", ""),
+            t.get("flag", "Unknown")
+        ])
     return output.getvalue()
 
 # ================================
-# 4. PDF REPORT – PROFESSIONAL
+# 4. PDF: USE DASHBOARD SUMMARY ONLY
 # ================================
-def generate_pdf_report(structured, summary):
+def generate_pdf_report(patient_name, age, gender, summary_text):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.8*inch, bottomMargin=0.8*inch, leftMargin=0.8*inch, rightMargin=0.8*inch)
     styles = getSampleStyleSheet()
 
-    # Styles
     title = ParagraphStyle('Title', parent=styles['Title'], fontSize=20, spaceAfter=15, textColor=colors.HexColor('#1E90FF'), alignment=1)
     heading = ParagraphStyle('Heading', parent=styles['Heading2'], fontSize=14, spaceAfter=8, textColor=colors.HexColor('#2E8B57'))
     normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=11, spaceAfter=6, leading=14)
@@ -134,59 +155,29 @@ def generate_pdf_report(structured, summary):
 
     story = []
 
-    # === HEADER ===
+    # Header
     story.append(Paragraph("MediReport AI", title))
     story.append(Paragraph(f"Generated on {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", small))
     story.append(Spacer(1, 0.2*inch))
 
-    # === PATIENT INFO ===
+    # Patient Info
     story.append(Paragraph("Patient Summary Report", heading))
-    p_name = structured.get('patient_name', 'N/A')
-    p_age = structured.get('age', 'N/A')
-    p_gender = structured.get('gender', 'N/A')
-    info = f"<b>Name:</b> {p_name} &nbsp;&nbsp;&nbsp; <b>Age:</b> {p_age} &nbsp;&nbsp;&nbsp; <b>Gender:</b> {p_gender}"
+    info = f"<b>Name:</b> {patient_name} &nbsp;&nbsp;&nbsp; <b>Age:</b> {age} &nbsp;&nbsp;&nbsp; <b>Gender:</b> {gender}"
     story.append(Paragraph(info, normal))
     story.append(Spacer(1, 0.3*inch))
 
-    # === SUMMARY ===
+    # Summary – FROM DASHBOARD ONLY
     story.append(Paragraph("Your Health Insights", heading))
-    clean_summary = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', summary)
-    clean_summary = html.escape(clean_summary)
-    clean_summary = clean_summary.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
-    clean_summary = clean_summary.replace('•', '<br/>• ').replace('\n', '<br/>')
-    story.append(Paragraph(f"<font name='Helvetica'>{clean_summary}</font>", normal))
-    story.append(PageBreak())
+    clean = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', summary_text)
+    clean = html.escape(clean)
+    clean = clean.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
+    clean = clean.replace('•', '<br/>• ').replace('\n', '<br/>')
+    story.append(Paragraph(f"<font name='Helvetica'>{clean}</font>", normal))
 
-    # === LAB TABLE ===
-    story.append(Paragraph("Key Lab Results", heading))
-    table_data = [["Test Name", "Value", "Unit", "Reference Range", "Status"]]
-    for t in structured.get("tests", [])[:12]:
-        status = t.get("flag", "Unknown")
-        color = colors.green if status == "Normal" else colors.red if status == "High" else colors.orange
-        status_cell = Paragraph(f"<font color='{color.name}'><b>{status}</b></font>", normal)
-        table_data.append([t["name"], t["value"], t.get("unit",""), t.get("range",""), status_cell])
-
-    table = Table(table_data, colWidths=[2.3*inch, 0.7*inch, 0.6*inch, 1.3*inch, 0.9*inch])
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1E90FF')),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,0), 11),
-        ('BOTTOMPADDING', (0,0), (-1,0), 12),
-        ('BACKGROUND', (0,1), (-1,-1), colors.white),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('LEFTPADDING', (0,1), (-1,-1), 6),
-        ('RIGHTPADDING', (0,1), (-1,-1), 6),
-    ]))
-    story.append(table)
-
-    # === FOOTER ===
+    # Footer
     story.append(Spacer(1, 0.5*inch))
-    story.append(Paragraph("<i>This is an AI-generated report for informational purposes only. Please consult your physician for medical advice.</i>", small))
+    story.append(Paragraph("<i>This is an AI-generated report for informational purposes only. Please consult your physician.</i>", small))
 
-    # Build
     try: doc.build(story)
     except: return None
     buffer.seek(0)
@@ -209,7 +200,12 @@ if uploaded:
 
     with st.spinner("Analyzing..."):
         structured = extract_structured(raw_text)
-        summary = summarize_report(raw_text, structured)
+        summary = summarize_report(raw_text, structured)  # ← This is shown on dashboard
+
+    # Extract patient info SAFELY
+    p_name = structured.get("patient_name", "Patient")
+    p_age = structured.get("age", "N/A")
+    p_gender = structured.get("gender", "N/A")
 
     col1, col2 = st.columns([1.2, 1.8])
     with col1:
@@ -217,19 +213,20 @@ if uploaded:
         st.json(structured, expanded=False)
     with col2:
         st.subheader("Your Health Summary")
-        st.markdown(summary)
+        st.markdown(summary)  # ← Dashboard summary
 
+    # === DOWNLOADS ===
     col_a, col_b = st.columns(2)
     with col_a:
         st.download_button("Download CSV", dict_to_csv(structured), "report.csv", "text/csv")
     with col_b:
-        pdf = generate_pdf_report(structured, summary)
+        pdf = generate_pdf_report(p_name, p_age, p_gender, summary)  # ← Uses dashboard summary
         if pdf:
-            name = re.sub(r'\W+', '_', structured.get("patient_name", "Patient"))
+            safe_name = re.sub(r'\W+', '_', p_name)
             st.download_button(
                 "Download PDF Report",
                 pdf,
-                f"Health_Report_{name}_{datetime.now().strftime('%Y%m%d')}.pdf",
+                f"Health_Report_{safe_name}_{datetime.now().strftime('%Y%m%d')}.pdf",
                 "application/pdf"
             )
         else:
