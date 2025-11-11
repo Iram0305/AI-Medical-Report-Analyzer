@@ -1,5 +1,5 @@
 # app.py
-# MediReport AI – PDF Input | Full Plots | Professional PDF | NO ERRORS
+# MediReport AI – PDF Input | Full Visuals | Perfect Radar | Clean PDF
 
 import streamlit as st
 import fitz
@@ -121,7 +121,7 @@ def summarize_report(text, data):
     return call_groq(prompt)
 
 # ================================
-# 4. VISUALIZATIONS
+# 4. VISUALIZATIONS – PERFECT RADAR
 # ================================
 def create_plots(df):
     if 'flag' not in df.columns:
@@ -154,17 +154,25 @@ def create_plots(df):
                 gauges.append(get_gauge(v, 0, 200, "Cholesterol", "mg/dL"))
         except: pass
 
-    # Radar
+    # RADAR CHART – FIXED
     categories = ['Diabetes', 'Heart', 'Liver', 'Anemia']
-    values = [0]*4
+    values = [0, 0, 0, 0]
+    risk_map = {'High': 3, 'Low': 2, 'Normal': 1, 'Unknown': 0}
+    
     for i, cat in enumerate(categories):
         matches = df[df['name'].str.contains(cat, case=False, na=False)]
-        if not matches.empty and matches.iloc[0]['flag'] != 'Normal':
-            values[i] = 3
-        elif not matches.empty:
-            values[i] = 1
-    fig_radar = go.Figure(data=go.Scatterpolar(r=values, theta=categories, fill='toself'))
-    fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 3])), height=300)
+        if not matches.empty:
+            flag = matches.iloc[0]['flag']
+            values[i] = risk_map.get(flag, 0)
+    
+    fig_radar = go.Figure(data=go.Scatterpolar(
+        r=values, theta=categories, fill='toself',
+        line_color='darkblue', fillcolor='lightblue', opacity=0.6
+    ))
+    fig_radar.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0, 3])),
+        showlegend=False, height=300, title="Health Risk Radar"
+    )
 
     return fig_bar, gauges, fig_radar
 
@@ -194,8 +202,8 @@ def add_plot_to_pdf(fig, story, width=5*inch, height=2.5*inch):
         img_data = fig.to_image(format="png", engine="kaleido")
         story.append(RLImage(io.BytesIO(img_data), width=width, height=height))
         story.append(Spacer(1, 0.2*inch))
-    except: 
-        story.append(Paragraph("Plot could not be rendered.", getSampleStyleSheet()['Normal']))
+    except Exception as e:
+        story.append(Paragraph(f"Plot error: {e}", getSampleStyleSheet()['Normal']))
 
 def generate_pdf_report(p_name, p_age, p_gender, summary_text, fig_bar, gauges, fig_radar):
     buffer = io.BytesIO()
@@ -223,18 +231,18 @@ def generate_pdf_report(p_name, p_age, p_gender, summary_text, fig_bar, gauges, 
         try:
             img_data = g.to_image(format="png", engine="kaleido")
             gauge_row.append(RLImage(io.BytesIO(img_data), width=1.8*inch, height=1.8*inch))
-        except: gauge_row.append(Paragraph("Gauge N/A", normal))
+        except: gauge_row.append(Paragraph("N/A", normal))
     story.append(Table([gauge_row], colWidths=[1.9*inch]*3))
     story.append(Spacer(1, 0.3*inch))
     add_plot_to_pdf(fig_radar, story, width=4*inch, height=3*inch)
 
-    # SUMMARY
+    # SUMMARY – NO HTML
     sections = re.split(r'##\s+', summary_text)
     for sec in sections[1:]:
         lines = sec.strip().split('\n', 1)
         if len(lines) < 2: continue
         story.append(Paragraph(lines[0].strip(), heading))
-        clean = re.sub(r'\*\*(.*?)\*\*', r'\1', lines[1])  # Remove **bold**
+        clean = re.sub(r'\*\*(.*?)\*\*', r'\1', lines[1])  # Remove bold
         story.append(Paragraph(clean, normal))
         story.append(Spacer(1, 0.2*inch))
 
