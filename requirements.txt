@@ -6,3 +6,6 @@ torch==2.4.*
 pillow==10.*
 requests==2.31.*
 reportlab==4.2.*
+plotly==5.18.*
+pandas==2.2.*
+kaleido==0.2.*
