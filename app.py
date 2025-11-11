@@ -1,9 +1,8 @@
 # app.py
-# MediReport AI – PDF Input | Spaced Plots | No Radar | Clean PDF
+# MediReport AI – CLEAN GAUGES | NO HTML | CORRECT NAME | NO EXTRA TESTS
 
 import streamlit as st
 import fitz
-import easyocr
 import requests
 import json
 import re
@@ -13,11 +12,10 @@ import plotly.graph_objects as go
 import io
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
-import html
 
 # ================================
 # 1. CONFIG
@@ -29,7 +27,6 @@ except KeyError:
     st.stop()
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-OCR_READER = easyocr.Reader(['en'], gpu=False)
 
 # ================================
 # 2. PROMPTS
@@ -120,7 +117,7 @@ def summarize_report(text, data):
     return call_groq(prompt)
 
 # ================================
-# 4. VISUALIZATIONS – SPACED OUT, FULL TITLES
+# 4. VISUALIZATIONS – NO DELTA, CLEAN GAUGES
 # ================================
 def create_plots(df):
     if 'flag' not in df.columns:
@@ -136,14 +133,9 @@ def create_plots(df):
         title="Test Results Overview",
         labels={'x': 'Status', 'y': 'Number of Tests'}
     )
-    fig_bar.update_layout(
-        showlegend=False,
-        height=400,  # Taller
-        margin=dict(t=80, b=60, l=60, r=60),  # More margin
-        title_x=0.5, title_font_size=18
-    )
+    fig_bar.update_layout(showlegend=False, height=400, margin=dict(t=80, b=60, l=60, r=60), title_x=0.5)
 
-    # Gauges – SPACED OUT
+    # Gauges – NO DELTA
     gauges = []
     for _, row in df.iterrows():
         try:
@@ -158,7 +150,7 @@ def create_plots(df):
                 gauges.append(get_gauge(v, 0, 200, "Total Cholesterol", "mg/dL"))
         except: pass
 
-    return fig_bar, gauges  # REMOVED RADAR
+    return fig_bar, gauges
 
 def parse_range(range_str):
     nums = re.findall(r"[\d.]+", str(range_str))
@@ -166,9 +158,8 @@ def parse_range(range_str):
 
 def get_gauge(value, low, high, title, unit):
     fig = go.Figure(go.Indicator(
-        mode="gauge+number+delta",
+        mode="gauge+number",  # REMOVED DELTA
         value=value,
-        delta={'reference': (low + high) / 2},
         title={'text': f"<b>{title}</b><br><span style='font-size:0.8em'>{unit}</span>"},
         gauge={
             'axis': {'range': [None, max(high*1.3, value*1.3)]},
@@ -180,7 +171,7 @@ def get_gauge(value, low, high, title, unit):
     return fig
 
 # ================================
-# 5. PDF – SPACED, FULL TITLES, NO RADAR
+# 5. PDF – NO HTML, PLAIN TEXT STATUS
 # ================================
 def add_plot_to_pdf(fig, story, width=6*inch, height=3*inch):
     try:
@@ -192,11 +183,11 @@ def add_plot_to_pdf(fig, story, width=6*inch, height=3*inch):
 
 def generate_pdf_report(p_name, p_age, p_gender, summary_text, fig_bar, gauges):
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.8*inch, bottomMargin=0.8*inch)
+    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.8*inch)
     styles = getSampleStyleSheet()
     title = ParagraphStyle('Title', parent=styles['Title'], fontSize=20, spaceAfter=20, textColor=colors.HexColor('#1E90FF'), alignment=1)
     heading = ParagraphStyle('Heading', parent=styles['Heading2'], fontSize=14, spaceAfter=12)
-    normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=11, spaceAfter=8, leading=14)
+    normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=11, spaceAfter=8)
     small = ParagraphStyle('Small', parent=styles['Normal'], fontSize=9, textColor=colors.gray)
 
     story = []
@@ -209,10 +200,8 @@ def generate_pdf_report(p_name, p_age, p_gender, summary_text, fig_bar, gauges):
     story.append(Paragraph(info, normal))
     story.append(Spacer(1, 0.4*inch))
 
-    # Bar Chart
-    add_plot_to_pdf(fig_bar, story, width=6*inch, height=3*inch)
+    add_plot_to_pdf(fig_bar, story)
 
-    # Gauges – 2 per row
     for i in range(0, len(gauges), 2):
         row = gauges[i:i+2]
         row_imgs = []
@@ -224,23 +213,39 @@ def generate_pdf_report(p_name, p_age, p_gender, summary_text, fig_bar, gauges):
         story.append(Table([row_imgs], colWidths=[3.1*inch]*2))
         story.append(Spacer(1, 0.3*inch))
 
+    # TABLE – PLAIN TEXT STATUS
+    story.append(Paragraph("Key Lab Results", heading))
+    table_data = [["Test", "Value", "Unit", "Range", "Status"]]
+    for _, row in pd.DataFrame(structured.get("tests", [])).iterrows():
+        status = row['flag']
+        table_data.append([row['name'], row['value'], row.get('unit',''), row.get('range',''), status])  # PLAIN TEXT
+    table = Table(table_data)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1E90FF')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('BACKGROUND', (0,1), (-1,-1), colors.white),
+    ]))
+    story.append(table)
+    story.append(Spacer(1, 0.3*inch))
+
     # Summary
     sections = re.split(r'##\s+', summary_text)
     for sec in sections[1:]:
         lines = sec.strip().split('\n', 1)
         if len(lines) < 2: continue
         story.append(Paragraph(lines[0].strip(), heading))
-        clean = re.sub(r'\*\*(.*?)\*\*', r'\1', lines[1])  # Remove bold
+        clean = re.sub(r'\*\*(.*?)\*\*', r'\1', lines[1])
         story.append(Paragraph(clean, normal))
         story.append(Spacer(1, 0.25*inch))
 
-    story.append(Paragraph("This is an AI-generated report for informational purposes only. Please consult your physician.", small))
+    story.append(Paragraph("AI-generated report. Consult your doctor.", small))
     doc.build(story)
     buffer.seek(0)
     return buffer
 
 # ================================
-# 6. UI – SPACED OUT, FULL TITLES
+# 6. UI
 # ================================
 st.set_page_config(page_title="MediReport AI", layout="wide", page_icon="medical")
 st.title("MediReport AI")
@@ -268,9 +273,8 @@ if uploaded:
     p_age = structured.get("age", "N/A")
     p_gender = structured.get("gender", "N/A")
 
-    fig_bar, gauges = create_plots(df)  # NO RADAR
+    fig_bar, gauges = create_plots(df)
 
-    # DASHBOARD – SPACED OUT
     st.markdown("## Visual Insights")
     st.plotly_chart(fig_bar, use_container_width=True)
     for g in gauges:
