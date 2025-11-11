@@ -1,5 +1,5 @@
 # app.py
-# MediReport AI – PDF Input | Full Visuals | Perfect Radar | Clean PDF
+# MediReport AI – PDF Input | Spaced Plots | No Radar | Clean PDF
 
 import streamlit as st
 import fitz
@@ -104,7 +104,6 @@ def extract_structured(text):
     try: data = json.loads(result)
     except: data = {"error": "Parse failed", "raw": result}
     
-    # SAFE DEFAULTS
     tests = data.get("tests", [])
     for t in tests:
         t.setdefault("name", "Unknown Test")
@@ -121,7 +120,7 @@ def summarize_report(text, data):
     return call_groq(prompt)
 
 # ================================
-# 4. VISUALIZATIONS – PERFECT RADAR
+# 4. VISUALIZATIONS – SPACED OUT, FULL TITLES
 # ================================
 def create_plots(df):
     if 'flag' not in df.columns:
@@ -135,46 +134,31 @@ def create_plots(df):
         color=flag_counts.index,
         color_discrete_map={'Normal': '#2E8B57', 'High': '#DC143C', 'Low': '#FF8C00', 'Unknown': '#808080'},
         title="Test Results Overview",
-        labels={'x': 'Status', 'y': 'Count'}
+        labels={'x': 'Status', 'y': 'Number of Tests'}
     )
-    fig_bar.update_layout(showlegend=False, height=300)
+    fig_bar.update_layout(
+        showlegend=False,
+        height=400,  # Taller
+        margin=dict(t=80, b=60, l=60, r=60),  # More margin
+        title_x=0.5, title_font_size=18
+    )
 
-    # Gauges
+    # Gauges – SPACED OUT
     gauges = []
     for _, row in df.iterrows():
         try:
             if 'Glucose' in row['name']:
                 v, low, high = float(row['value']), *parse_range(row['range'])
-                gauges.append(get_gauge(v, low, high, "Glucose", "mg/dL"))
+                gauges.append(get_gauge(v, low, high, "Fasting Glucose", "mg/dL"))
             if 'HbA1c' in row['name']:
                 v = float(row['value'])
                 gauges.append(get_gauge(v, 0, 5.7, "HbA1c", "%"))
             if 'Cholesterol' in row['name']:
                 v = float(row['value'])
-                gauges.append(get_gauge(v, 0, 200, "Cholesterol", "mg/dL"))
+                gauges.append(get_gauge(v, 0, 200, "Total Cholesterol", "mg/dL"))
         except: pass
 
-    # RADAR CHART – FIXED
-    categories = ['Diabetes', 'Heart', 'Liver', 'Anemia']
-    values = [0, 0, 0, 0]
-    risk_map = {'High': 3, 'Low': 2, 'Normal': 1, 'Unknown': 0}
-    
-    for i, cat in enumerate(categories):
-        matches = df[df['name'].str.contains(cat, case=False, na=False)]
-        if not matches.empty:
-            flag = matches.iloc[0]['flag']
-            values[i] = risk_map.get(flag, 0)
-    
-    fig_radar = go.Figure(data=go.Scatterpolar(
-        r=values, theta=categories, fill='toself',
-        line_color='darkblue', fillcolor='lightblue', opacity=0.6
-    ))
-    fig_radar.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 3])),
-        showlegend=False, height=300, title="Health Risk Radar"
-    )
-
-    return fig_bar, gauges, fig_radar
+    return fig_bar, gauges  # REMOVED RADAR
 
 def parse_range(range_str):
     nums = re.findall(r"[\d.]+", str(range_str))
@@ -182,61 +166,65 @@ def parse_range(range_str):
 
 def get_gauge(value, low, high, title, unit):
     fig = go.Figure(go.Indicator(
-        mode="gauge+number",
+        mode="gauge+number+delta",
         value=value,
-        title={'text': f"{title} ({unit})"},
+        delta={'reference': (low + high) / 2},
+        title={'text': f"<b>{title}</b><br><span style='font-size:0.8em'>{unit}</span>"},
         gauge={
             'axis': {'range': [None, max(high*1.3, value*1.3)]},
             'bar': {'color': "red" if value > high else "orange" if value < low else "green"},
             'steps': [{'range': [0, low], 'color': "lightgray"}, {'range': [low, high], 'color': "yellow"}]
         }
     ))
-    fig.update_layout(height=220, margin=dict(t=40, b=0))
+    fig.update_layout(height=300, margin=dict(t=80, b=20, l=40, r=40))
     return fig
 
 # ================================
-# 5. PDF – NO HTML, FULL PLOTS
+# 5. PDF – SPACED, FULL TITLES, NO RADAR
 # ================================
-def add_plot_to_pdf(fig, story, width=5*inch, height=2.5*inch):
+def add_plot_to_pdf(fig, story, width=6*inch, height=3*inch):
     try:
-        img_data = fig.to_image(format="png", engine="kaleido")
+        img_data = fig.to_image(format="png", engine="kaleido", width=800, height=400)
         story.append(RLImage(io.BytesIO(img_data), width=width, height=height))
-        story.append(Spacer(1, 0.2*inch))
-    except Exception as e:
-        story.append(Paragraph(f"Plot error: {e}", getSampleStyleSheet()['Normal']))
+        story.append(Spacer(1, 0.3*inch))
+    except: 
+        story.append(Paragraph("Plot could not be rendered.", getSampleStyleSheet()['Normal']))
 
-def generate_pdf_report(p_name, p_age, p_gender, summary_text, fig_bar, gauges, fig_radar):
+def generate_pdf_report(p_name, p_age, p_gender, summary_text, fig_bar, gauges):
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.8*inch)
+    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.8*inch, bottomMargin=0.8*inch)
     styles = getSampleStyleSheet()
-    title = ParagraphStyle('Title', parent=styles['Title'], fontSize=20, spaceAfter=15, textColor=colors.HexColor('#1E90FF'), alignment=1)
-    heading = ParagraphStyle('Heading', parent=styles['Heading2'], fontSize=14, spaceAfter=10)
-    normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=11, spaceAfter=8)
+    title = ParagraphStyle('Title', parent=styles['Title'], fontSize=20, spaceAfter=20, textColor=colors.HexColor('#1E90FF'), alignment=1)
+    heading = ParagraphStyle('Heading', parent=styles['Heading2'], fontSize=14, spaceAfter=12)
+    normal = ParagraphStyle('Normal', parent=styles['Normal'], fontSize=11, spaceAfter=8, leading=14)
     small = ParagraphStyle('Small', parent=styles['Normal'], fontSize=9, textColor=colors.gray)
 
     story = []
     story.append(Paragraph("MediReport AI", title))
-    story.append(Paragraph(f"Generated on {datetime.now().strftime('%B %d, %Y')}", small))
-    story.append(Spacer(1, 0.3*inch))
+    story.append(Paragraph(f"Generated on {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", small))
+    story.append(Spacer(1, 0.4*inch))
 
     story.append(Paragraph("Patient Summary Report", heading))
     info = f"<b>Name:</b> {p_name} &nbsp;&nbsp; <b>Age:</b> {p_age} &nbsp;&nbsp; <b>Gender:</b> {p_gender}"
     story.append(Paragraph(info, normal))
-    story.append(Spacer(1, 0.3*inch))
+    story.append(Spacer(1, 0.4*inch))
 
-    # PLOTS
-    add_plot_to_pdf(fig_bar, story)
-    gauge_row = []
-    for g in gauges[:3]:
-        try:
-            img_data = g.to_image(format="png", engine="kaleido")
-            gauge_row.append(RLImage(io.BytesIO(img_data), width=1.8*inch, height=1.8*inch))
-        except: gauge_row.append(Paragraph("N/A", normal))
-    story.append(Table([gauge_row], colWidths=[1.9*inch]*3))
-    story.append(Spacer(1, 0.3*inch))
-    add_plot_to_pdf(fig_radar, story, width=4*inch, height=3*inch)
+    # Bar Chart
+    add_plot_to_pdf(fig_bar, story, width=6*inch, height=3*inch)
 
-    # SUMMARY – NO HTML
+    # Gauges – 2 per row
+    for i in range(0, len(gauges), 2):
+        row = gauges[i:i+2]
+        row_imgs = []
+        for g in row:
+            try:
+                img_data = g.to_image(format="png", engine="kaleido", width=500, height=300)
+                row_imgs.append(RLImage(io.BytesIO(img_data), width=3*inch, height=1.8*inch))
+            except: row_imgs.append(Paragraph("N/A", normal))
+        story.append(Table([row_imgs], colWidths=[3.1*inch]*2))
+        story.append(Spacer(1, 0.3*inch))
+
+    # Summary
     sections = re.split(r'##\s+', summary_text)
     for sec in sections[1:]:
         lines = sec.strip().split('\n', 1)
@@ -244,15 +232,15 @@ def generate_pdf_report(p_name, p_age, p_gender, summary_text, fig_bar, gauges, 
         story.append(Paragraph(lines[0].strip(), heading))
         clean = re.sub(r'\*\*(.*?)\*\*', r'\1', lines[1])  # Remove bold
         story.append(Paragraph(clean, normal))
-        story.append(Spacer(1, 0.2*inch))
+        story.append(Spacer(1, 0.25*inch))
 
-    story.append(Paragraph("AI-generated report. Consult your doctor.", small))
+    story.append(Paragraph("This is an AI-generated report for informational purposes only. Please consult your physician.", small))
     doc.build(story)
     buffer.seek(0)
     return buffer
 
 # ================================
-# 6. UI
+# 6. UI – SPACED OUT, FULL TITLES
 # ================================
 st.set_page_config(page_title="MediReport AI", layout="wide", page_icon="medical")
 st.title("MediReport AI")
@@ -280,29 +268,29 @@ if uploaded:
     p_age = structured.get("age", "N/A")
     p_gender = structured.get("gender", "N/A")
 
-    fig_bar, gauges, fig_radar = create_plots(df)
+    fig_bar, gauges = create_plots(df)  # NO RADAR
 
-    col1, col2 = st.columns([1.4, 1])
-    with col1:
-        st.plotly_chart(fig_bar, use_container_width=True)
-        for g in gauges:
-            st.plotly_chart(g, use_container_width=True)
-        st.plotly_chart(fig_radar, use_container_width=True)
-    with col2:
-        st.markdown("## Health Summary")
-        sections = re.split(r'##\s+', summary)
-        for sec in sections[1:]:
-            lines = sec.strip().split('\n', 1)
-            if len(lines) < 2: continue
-            st.markdown(f"### {lines[0].strip()}")
-            st.markdown(lines[1].strip())
+    # DASHBOARD – SPACED OUT
+    st.markdown("## Visual Insights")
+    st.plotly_chart(fig_bar, use_container_width=True)
+    for g in gauges:
+        st.plotly_chart(g, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("## Health Summary")
+    sections = re.split(r'##\s+', summary)
+    for sec in sections[1:]:
+        lines = sec.strip().split('\n', 1)
+        if len(lines) < 2: continue
+        st.markdown(f"### {lines[0].strip()}")
+        st.markdown(lines[1].strip())
 
     col_a, col_b = st.columns(2)
     with col_a:
         csv_data = df.to_csv(index=False).encode()
         st.download_button("Download CSV", csv_data, "report.csv", "text/csv")
     with col_b:
-        pdf = generate_pdf_report(p_name, p_age, p_gender, summary, fig_bar, gauges, fig_radar)
+        pdf = generate_pdf_report(p_name, p_age, p_gender, summary, fig_bar, gauges)
         if pdf:
             safe_name = re.sub(r'\W+', '_', p_name)
             st.download_button("Download PDF Report", pdf, f"Health_Report_{safe_name}.pdf", "application/pdf")
