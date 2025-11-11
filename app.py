@@ -1,5 +1,5 @@
 # app.py
-# MediReport AI – Single File, Free, Streamlit Cloud Ready
+# MediReport AI – Single File, Free, Streamlit Cloud Ready (FIXED: Escaped prompts for Groq)
 # Uses Groq (free), EasyOCR (CPU), PyMuPDF
 # Deploy with: requirements.txt + runtime.txt + secrets.toml
 
@@ -32,33 +32,37 @@ GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 OCR_READER = easyocr.Reader(['en'], gpu=False)
 
 # ================================
-# 2. PROMPTS (Embedded)
+# 2. PROMPTS (Embedded & Escaped for JSON Safety)
 # ================================
-EXTRACT_PROMPT = """
+# Escape JSON example to prevent payload malformation
+JSON_EXAMPLE = {
+    "patient_name": "",
+    "age": "",
+    "gender": "",
+    "report_date": "",
+    "tests": [
+        {
+            "name": "",
+            "value": "",
+            "unit": "",
+            "range": "",
+            "flag": "Normal/High/Low"
+        }
+    ],
+    "impression": ""
+}
+JSON_EXAMPLE_STR = json.dumps(JSON_EXAMPLE, indent=2)
+
+EXTRACT_PROMPT_TEMPLATE = """
 Extract the following in JSON only. No extra text.
 
-{
-  "patient_name": "",
-  "age": "",
-  "gender": "",
-  "report_date": "",
-  "tests": [
-    {
-      "name": "",
-      "value": "",
-      "unit": "",
-      "range": "",
-      "flag": "Normal/High/Low"
-    }
-  ],
-  "impression": ""
-}
+{json_example}
 
 Text:
 {{TEXT}}
 """
 
-SUMMARY_PROMPT = """
+SUMMARY_PROMPT_TEMPLATE = """
 Convert this medical report into a simple 4-5 bullet summary for a patient.
 Use **bold** for abnormal values.
 
@@ -90,17 +94,25 @@ def call_groq(prompt, model="llama3-8b-8192"):
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
-        "max_tokens": 1024
+        "max_tokens": 1024,
+        "n": 1  # Explicitly set to 1 (Groq requirement, prevents 400)
     }
     try:
         resp = requests.post(GROQ_URL, json=payload, headers=headers, timeout=30)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 400:
+            return json.dumps({"error": f"400 Bad Request: {e.response.text}"})
+        return json.dumps({"error": str(e)})
     except Exception as e:
         return json.dumps({"error": str(e)})
 
 def extract_structured(text):
-    prompt = EXTRACT_PROMPT.replace("{{TEXT}}", text[:12000])
+    prompt = EXTRACT_PROMPT_TEMPLATE.format(
+        json_example=JSON_EXAMPLE_STR,
+        TEXT=text[:12000]
+    )
     result = call_groq(prompt, model="llama3-8b-8192")
     try:
         data = json.loads(result)
@@ -124,8 +136,8 @@ def extract_structured(text):
     return data
 
 def summarize_report(text, data):
-    prompt = SUMMARY_PROMPT.replace("{{TEXT}}", text[:6000]) \
-                          .replace("{{DATA}}", json.dumps(data, indent=2))
+    prompt = SUMMARY_PROMPT_TEMPLATE.replace("{{TEXT}}", text[:6000]) \
+                                   .replace("{{DATA}}", json.dumps(data, indent=2))
     return call_groq(prompt, model="llama3-70b-8192")
 
 def dict_to_csv(data):
@@ -149,8 +161,8 @@ def dict_to_csv(data):
 # ================================
 # 4. STREAMLIT UI
 # ================================
-st.set_page_config(page_title="MediReport AI", layout="centered", page_icon="medical")
-st.title("MediReport AI")
+st.set_page_config(page_title="MediReport AI", layout="centered", page_icon="🩺")
+st.title("🩺 MediReport AI")
 st.caption("Upload medical report (PDF or Image) → Get AI-powered summary instantly")
 
 uploaded = st.file_uploader(
@@ -170,6 +182,8 @@ if uploaded:
     if not raw_text.strip():
         st.error("No text found. Try a clearer image or PDF.")
         st.stop()
+
+    st.info(f"Extracted text preview: {raw_text[:200]}...")  # Debug: Show snippet
 
     with st.spinner("Analyzing with AI (Groq)..."):
         structured = extract_structured(raw_text)
@@ -202,4 +216,4 @@ st.markdown(
     Made in India | November 11, 2025
     """
 )
-st.caption("For support: [GitHub Issues](https://github.com/yourname/ai-medical-report-analyzer)")
+st.caption("For support: Check logs or reboot app if issues persist.")
